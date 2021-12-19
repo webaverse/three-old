@@ -25422,6 +25422,7 @@ function WebGLRenderer( parameters = {} ) {
 		_this.shadowMap = shadowMap;
 		_this.state = state;
 		_this.info = info;
+		_this.attributes = attributes;
 
 	}
 
