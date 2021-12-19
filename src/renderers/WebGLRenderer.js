@@ -1,5 +1,4 @@
 import {
-	REVISION,
 	BackSide,
 	DoubleSide,
 	FrontSide,
@@ -216,10 +215,8 @@ function WebGLRenderer( parameters = {} ) {
 			failIfMajorPerformanceCaveat: _failIfMajorPerformanceCaveat
 		};
 
-		// OffscreenCanvas does not have setAttribute, see #22811
-		if ( 'setAttribute' in _canvas ) _canvas.setAttribute( 'data-engine', `three.js r${REVISION}` );
-
 		// event listeners must be registered before WebGL context is created, see #12753
+
 		_canvas.addEventListener( 'webglcontextlost', onContextLost, false );
 		_canvas.addEventListener( 'webglcontextrestored', onContextRestore, false );
 
@@ -663,13 +660,84 @@ function WebGLRenderer( parameters = {} ) {
 
 	// Buffer rendering
 
+	function renderObjectImmediate( object, program ) {
+
+		object.render( function ( object ) {
+
+			_this.renderBufferImmediate( object, program );
+
+		} );
+
+	}
+
+	this.renderBufferImmediate = function ( object, program ) {
+
+		bindingStates.initAttributes();
+
+		const buffers = properties.get( object );
+
+		if ( object.hasPositions && ! buffers.position ) buffers.position = _gl.createBuffer();
+		if ( object.hasNormals && ! buffers.normal ) buffers.normal = _gl.createBuffer();
+		if ( object.hasUvs && ! buffers.uv ) buffers.uv = _gl.createBuffer();
+		if ( object.hasColors && ! buffers.color ) buffers.color = _gl.createBuffer();
+
+		const programAttributes = program.getAttributes();
+
+		if ( object.hasPositions ) {
+
+			_gl.bindBuffer( _gl.ARRAY_BUFFER, buffers.position );
+			_gl.bufferData( _gl.ARRAY_BUFFER, object.positionArray, _gl.DYNAMIC_DRAW );
+
+			bindingStates.enableAttribute( programAttributes.position.location );
+			_gl.vertexAttribPointer( programAttributes.position.location, 3, _gl.FLOAT, false, 0, 0 );
+
+		}
+
+		if ( object.hasNormals ) {
+
+			_gl.bindBuffer( _gl.ARRAY_BUFFER, buffers.normal );
+			_gl.bufferData( _gl.ARRAY_BUFFER, object.normalArray, _gl.DYNAMIC_DRAW );
+
+			bindingStates.enableAttribute( programAttributes.normal.location );
+			_gl.vertexAttribPointer( programAttributes.normal.location, 3, _gl.FLOAT, false, 0, 0 );
+
+		}
+
+		if ( object.hasUvs ) {
+
+			_gl.bindBuffer( _gl.ARRAY_BUFFER, buffers.uv );
+			_gl.bufferData( _gl.ARRAY_BUFFER, object.uvArray, _gl.DYNAMIC_DRAW );
+
+			bindingStates.enableAttribute( programAttributes.uv.location );
+			_gl.vertexAttribPointer( programAttributes.uv.location, 2, _gl.FLOAT, false, 0, 0 );
+
+		}
+
+		if ( object.hasColors ) {
+
+			_gl.bindBuffer( _gl.ARRAY_BUFFER, buffers.color );
+			_gl.bufferData( _gl.ARRAY_BUFFER, object.colorArray, _gl.DYNAMIC_DRAW );
+
+			bindingStates.enableAttribute( programAttributes.color.location );
+			_gl.vertexAttribPointer( programAttributes.color.location, 3, _gl.FLOAT, false, 0, 0 );
+
+		}
+
+		bindingStates.disableUnusedAttributes();
+
+		_gl.drawArrays( _gl.TRIANGLES, 0, object.count );
+
+		object.count = 0;
+
+	};
+
 	this.renderBufferDirect = function ( camera, scene, geometry, material, object, group ) {
 
 		if ( scene === null ) scene = _emptyScene; // renderBufferDirect second parameter used to be fog (could be null)
 
 		const frontFaceCW = ( object.isMesh && object.matrixWorld.determinant() < 0 );
 
-		const program = setProgram( camera, scene, geometry, material, object );
+		const program = setProgram( camera, scene, material, object );
 
 		state.setMaterial( material, frontFaceCW );
 
@@ -698,6 +766,12 @@ function WebGLRenderer( parameters = {} ) {
 
 			index = geometries.getWireframeAttribute( geometry );
 			rangeFactor = 2;
+
+		}
+
+		if ( geometry.morphAttributes.position !== undefined || geometry.morphAttributes.normal !== undefined ) {
+
+			morphtargets.update( object, geometry, material, program );
 
 		}
 
@@ -1098,6 +1172,17 @@ function WebGLRenderer( parameters = {} ) {
 
 				}
 
+			} else if ( object.isImmediateRenderObject ) {
+
+				if ( sortObjects ) {
+
+					_vector3.setFromMatrixPosition( object.matrixWorld )
+						.applyMatrix4( _projScreenMatrix );
+
+				}
+
+				currentRenderList.push( object, null, object.material, groupOrder, _vector3.z, null );
+
 			} else if ( object.isMesh || object.isLine || object.isPoints ) {
 
 				if ( object.isSkinnedMesh ) {
@@ -1195,8 +1280,7 @@ function WebGLRenderer( parameters = {} ) {
 				minFilter: LinearMipmapLinearFilter,
 				magFilter: NearestFilter,
 				wrapS: ClampToEdgeWrapping,
-				wrapT: ClampToEdgeWrapping,
-				useRenderToTexture: extensions.has( 'WEBGL_multisampled_render_to_texture' )
+				wrapT: ClampToEdgeWrapping
 			} );
 
 		}
@@ -1253,21 +1337,35 @@ function WebGLRenderer( parameters = {} ) {
 
 		material.onBeforeRender( _this, scene, camera, geometry, object, group );
 
-		if ( material.transparent === true && material.side === DoubleSide ) {
+		if ( object.isImmediateRenderObject ) {
 
-			material.side = BackSide;
-			material.needsUpdate = true;
-			_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+			const program = setProgram( camera, scene, material, object );
 
-			material.side = FrontSide;
-			material.needsUpdate = true;
-			_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+			state.setMaterial( material );
 
-			material.side = DoubleSide;
+			bindingStates.reset();
+
+			renderObjectImmediate( object, program );
 
 		} else {
 
-			_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+			if ( material.transparent === true && material.side === DoubleSide ) {
+
+				material.side = BackSide;
+				material.needsUpdate = true;
+				_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+
+				material.side = FrontSide;
+				material.needsUpdate = true;
+				_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+
+				material.side = DoubleSide;
+
+			} else {
+
+				_this.renderBufferDirect( camera, scene, geometry, material, object, group );
+
+			}
 
 		}
 
@@ -1326,7 +1424,7 @@ function WebGLRenderer( parameters = {} ) {
 
 			parameters.uniforms = programCache.getUniforms( material );
 
-			material.onBuild( object, parameters, _this );
+			material.onBuild( parameters, _this );
 
 			material.onBeforeCompile( parameters, _this );
 
@@ -1406,7 +1504,7 @@ function WebGLRenderer( parameters = {} ) {
 
 	}
 
-	function setProgram( camera, scene, geometry, material, object ) {
+	function setProgram( camera, scene, material, object ) {
 
 		if ( scene.isScene !== true ) scene = _emptyScene; // scene could be a Mesh, Line, Points, ...
 
@@ -1416,11 +1514,11 @@ function WebGLRenderer( parameters = {} ) {
 		const environment = material.isMeshStandardMaterial ? scene.environment : null;
 		const encoding = ( _currentRenderTarget === null ) ? _this.outputEncoding : _currentRenderTarget.texture.encoding;
 		const envMap = ( material.isMeshStandardMaterial ? cubeuvmaps : cubemaps ).get( material.envMap || environment );
-		const vertexAlphas = material.vertexColors === true && !! geometry.attributes.color && geometry.attributes.color.itemSize === 4;
-		const vertexTangents = !! material.normalMap && !! geometry.attributes.tangent;
-		const morphTargets = !! geometry.morphAttributes.position;
-		const morphNormals = !! geometry.morphAttributes.normal;
-		const morphTargetsCount = !! geometry.morphAttributes.position ? geometry.morphAttributes.position.length : 0;
+		const vertexAlphas = material.vertexColors === true && !! object.geometry && !! object.geometry.attributes.color && object.geometry.attributes.color.itemSize === 4;
+		const vertexTangents = !! material.normalMap && !! object.geometry && !! object.geometry.attributes.tangent;
+		const morphTargets = !! object.geometry && !! object.geometry.morphAttributes.position;
+		const morphNormals = !! object.geometry && !! object.geometry.morphAttributes.normal;
+		const morphTargetsCount = ( !! object.geometry && !! object.geometry.morphAttributes.position ) ? object.geometry.morphAttributes.position.length : 0;
 
 		const materialProperties = properties.get( material );
 		const lights = currentRenderState.state.lights;
@@ -1618,9 +1716,9 @@ function WebGLRenderer( parameters = {} ) {
 
 		}
 
-		// skinning and morph target uniforms must be set even if material didn't change
-		// auto-setting of texture unit for bone and morph texture must go before other textures
-		// otherwise textures used for skinning and morphing can take over texture units reserved for other material textures
+		// skinning uniforms must be set even if material didn't change
+		// auto-setting of texture unit for bone texture must go before other textures
+		// otherwise textures used for skinning can take over texture units reserved for other material textures
 
 		if ( object.isSkinnedMesh ) {
 
@@ -1647,13 +1745,6 @@ function WebGLRenderer( parameters = {} ) {
 			}
 
 		}
-
-		if ( !! geometry && ( geometry.morphAttributes.position !== undefined || geometry.morphAttributes.normal !== undefined ) ) {
-
-			morphtargets.update( object, geometry, material, program );
-
-		}
-
 
 		if ( refreshMaterial || materialProperties.receiveShadow !== object.receiveShadow ) {
 
@@ -1762,71 +1853,15 @@ function WebGLRenderer( parameters = {} ) {
 
 	};
 
-	this.setRenderTargetTextures = function ( renderTarget, colorTexture, depthTexture ) {
-
-		properties.get( renderTarget.texture ).__webglTexture = colorTexture;
-		properties.get( renderTarget.depthTexture ).__webglTexture = depthTexture;
-
-		const renderTargetProperties = properties.get( renderTarget );
-		renderTargetProperties.__hasExternalTextures = true;
-
-		if ( renderTargetProperties.__hasExternalTextures ) {
-
-			renderTargetProperties.__autoAllocateDepthBuffer = depthTexture === undefined;
-
-			if ( ! renderTargetProperties.__autoAllocateDepthBuffer ) {
-
-				// The multisample_render_to_texture extension doesn't work properly if there
-				// are midframe flushes and an external depth buffer. Disable use of the extension.
-				if ( renderTarget.useRenderToTexture ) {
-
-					console.warn( 'render-to-texture extension was disabled because an external texture was provided' );
-					renderTarget.useRenderToTexture = false;
-					renderTarget.useRenderbuffer = true;
-
-				}
-
-			}
-
-		}
-
-	};
-
-	this.setRenderTargetFramebuffer = function ( renderTarget, defaultFramebuffer ) {
-
-		const renderTargetProperties = properties.get( renderTarget );
-		renderTargetProperties.__webglFramebuffer = defaultFramebuffer;
-		renderTargetProperties.__useDefaultFramebuffer = defaultFramebuffer === undefined;
-
-	};
-
 	this.setRenderTarget = function ( renderTarget, activeCubeFace = 0, activeMipmapLevel = 0 ) {
 
 		_currentRenderTarget = renderTarget;
 		_currentActiveCubeFace = activeCubeFace;
 		_currentActiveMipmapLevel = activeMipmapLevel;
-		let useDefaultFramebuffer = true;
 
-		if ( renderTarget ) {
+		if ( renderTarget && properties.get( renderTarget ).__webglFramebuffer === undefined ) {
 
-			const renderTargetProperties = properties.get( renderTarget );
-
-			if ( renderTargetProperties.__useDefaultFramebuffer !== undefined ) {
-
-				// We need to make sure to rebind the framebuffer.
-				state.bindFramebuffer( _gl.FRAMEBUFFER, null );
-				useDefaultFramebuffer = false;
-
-			} else if ( renderTargetProperties.__webglFramebuffer === undefined ) {
-
-				textures.setupRenderTarget( renderTarget );
-
-			} else if ( renderTargetProperties.__hasExternalTextures ) {
-
-				// Color and depth texture must be rebound in order for the swapchain to update.
-				textures.rebindTextures( renderTarget, properties.get( renderTarget.texture ).__webglTexture, properties.get( renderTarget.depthTexture ).__webglTexture );
-
-			}
+			textures.setupRenderTarget( renderTarget );
 
 		}
 
@@ -1851,7 +1886,7 @@ function WebGLRenderer( parameters = {} ) {
 				framebuffer = __webglFramebuffer[ activeCubeFace ];
 				isCube = true;
 
-			} else if ( renderTarget.useRenderbuffer ) {
+			} else if ( renderTarget.isWebGLMultisampleRenderTarget ) {
 
 				framebuffer = properties.get( renderTarget ).__webglMultisampledFramebuffer;
 
@@ -1875,7 +1910,7 @@ function WebGLRenderer( parameters = {} ) {
 
 		const framebufferBound = state.bindFramebuffer( _gl.FRAMEBUFFER, framebuffer );
 
-		if ( framebufferBound && capabilities.drawBuffers && useDefaultFramebuffer ) {
+		if ( framebufferBound && capabilities.drawBuffers ) {
 
 			let needsUpdate = false;
 
@@ -2211,7 +2246,5 @@ function WebGLRenderer( parameters = {} ) {
 	}
 
 }
-
-WebGLRenderer.prototype.isWebGLRenderer = true;
 
 export { WebGLRenderer };
